@@ -6,6 +6,10 @@ Written up in full here: [Building a Homelab SOC on a Raspberry Pi with MCP and 
 
 > **Status:** the write-up describes a working v1. The source in this repo is being cleaned up for others to actually run before it lands here — this README exists so the link in the blog post has somewhere real to point to. Watch this space.
 
+## Want to build your own?
+
+Rather than a static setup guide, this repo has [`SETUP-WITH-AI.md`](./SETUP-WITH-AI.md) — a file written as instructions *to an AI assistant*, not to you. Paste the whole thing into Claude, ChatGPT, or whatever you use, and it'll interview you (your hardware, your Entra access, which signals you actually want) and walk you through the setup adapted to your actual answers, rather than assuming you're on a Raspberry Pi 4 like the original.
+
 ## Architecture
 
 Three layers, all running via Docker Compose on the Pi:
