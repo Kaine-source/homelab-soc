@@ -19,6 +19,7 @@ services:
     command: python src/dashboard.py
     volumes:
       - ./src:/app/src
+      - /home/kaine:/home/kaine
 
   ntfy:
     image: binwiederhier/ntfy

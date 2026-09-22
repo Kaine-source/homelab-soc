@@ -59,7 +59,7 @@ def get_offline_devices() -> str:
     logger.info("get_offline_devices called")
     _log_action("get_offline_devices", {})
     devices = get_devices()
-    offline = [d for d in devices if d.get("blocksIncomingConnections")]
+    offline = [d for d in devices if not d.get("connectedToControl")]
     if not offline:
         return "All devices appear online."
     return "\n".join([f"- {d['name']} | Last seen: {d['lastSeen']}" for d in offline])
@@ -201,11 +201,16 @@ if __name__ == "__main__":
     from starlette.routing import Route, Mount
     from starlette.requests import Request as StarletteRequest
 
+    if not MCP_AUTH_TOKEN:
+        raise SystemExit(
+            "MCP_AUTH_TOKEN is not set. This server exposes run_command and the "
+            "Docker socket — refusing to start without an auth token rather than "
+            "allowing unauthenticated access."
+        )
+
     sse = SseServerTransport("/messages/")
 
     def _auth_ok(request) -> bool:
-        if not MCP_AUTH_TOKEN:
-            return True
         return request.headers.get("Authorization", "") == f"Bearer {MCP_AUTH_TOKEN}"
 
     async def health(request):

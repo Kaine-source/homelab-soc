@@ -1,4 +1,6 @@
 import os, json, time, httpx
+from html import escape
+from urllib.parse import quote
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -493,14 +495,16 @@ async def audit(request):
               <td>{ri} {result}</td>
             </tr>"""
 
-        # Filter chips
-        day_chips = "".join([f'<a href="?days={d}{"&cat="+cat_filt if cat_filt else ""}{"&result="+res_filt if res_filt else ""}" class="filter-chip {"active" if days==d else ""}">{d}d</a>' for d in [1,7,14,30]])
-        cat_chips = f'<a href="?days={days}{"&result="+res_filt if res_filt else ""}" class="filter-chip {"active" if not cat_filt else ""}">All</a>'
+        # Filter chips — query-string values URL-encoded, displayed text HTML-escaped
+        cat_filt_q = quote(cat_filt, safe="")
+        res_filt_q = quote(res_filt, safe="")
+        day_chips = "".join([f'<a href="?days={d}{"&cat="+cat_filt_q if cat_filt else ""}{"&result="+res_filt_q if res_filt else ""}" class="filter-chip {"active" if days==d else ""}">{d}d</a>' for d in [1,7,14,30]])
+        cat_chips = f'<a href="?days={days}{"&result="+res_filt_q if res_filt else ""}" class="filter-chip {"active" if not cat_filt else ""}">All</a>'
         for cat_name, cnt in sorted(cats.items(), key=lambda x: -x[1]):
             active = "active" if cat_filt == cat_name else ""
-            cat_chips += f'<a href="?days={days}&cat={cat_name}{"&result="+res_filt if res_filt else ""}" class="filter-chip {active}">{cat_name} <span style="opacity:.6">({cnt})</span></a>'
+            cat_chips += f'<a href="?days={days}&cat={quote(cat_name, safe="")}{"&result="+res_filt_q if res_filt else ""}" class="filter-chip {active}">{escape(cat_name)} <span style="opacity:.6">({cnt})</span></a>'
         res_chips = "".join([
-            f'<a href="?days={days}{"&cat="+cat_filt if cat_filt else ""}{"&result=" if r else ""}{r}" class="filter-chip {"active" if res_filt==r else ""}">{l}</a>'
+            f'<a href="?days={days}{"&cat="+cat_filt_q if cat_filt else ""}{"&result=" if r else ""}{r}" class="filter-chip {"active" if res_filt==r else ""}">{l}</a>'
             for r, l in [("","All"),("success","✅ Success"),("failure","❌ Failure")]
         ])
 

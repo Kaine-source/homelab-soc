@@ -200,25 +200,29 @@ def list_stale_users() -> str:
 
 @mcp.tool()
 def check_mfa_gaps() -> str:
-    """List enabled users with no MFA methods registered — accounts relying on password only."""
+    """List enabled users with no MFA method registered, per Entra's MFA registration report."""
     logger.info("check_mfa_gaps called")
     _log_action("check_mfa_gaps", {})
     users = graph_get("/users?$select=displayName,userPrincipalName,accountEnabled&$filter=accountEnabled eq true")
-    gaps = []
-    for u in users.get("value", []):
-        upn = u["userPrincipalName"]
-        try:
-            methods = graph_get(f"/users/{upn}/authentication/methods")
-            method_types = [m.get("@odata.type", "").split(".")[-1] for m in methods.get("value", [])]
-            # passwordAuthenticationMethod alone = no MFA
-            non_password = [m for m in method_types if "password" not in m.lower()]
-            if not non_password:
-                gaps.append(f"- {u['displayName']} ({upn}) — methods: {', '.join(method_types) or 'none'}")
-        except Exception as e:
-            gaps.append(f"- {u['displayName']} ({upn}) — ⚠️ could not read methods: {e}")
+    enabled = {u["userPrincipalName"].lower(): u for u in users.get("value", [])}
+
+    report = graph_get(
+        "/reports/authenticationMethods/userRegistrationDetails"
+        "?$select=userPrincipalName,isMfaRegistered"
+    )
+    registered = {
+        r["userPrincipalName"].lower(): r.get("isMfaRegistered", False)
+        for r in report.get("value", [])
+    }
+
+    gaps = [
+        f"- {u['displayName']} ({u['userPrincipalName']})"
+        for upn_lower, u in enabled.items()
+        if not registered.get(upn_lower, False)
+    ]
     if not gaps:
         return "✅ All enabled users have at least one MFA method registered."
-    return f"⚠️ MFA gaps — password only ({len(gaps)} users):\n" + "\n".join(gaps)
+    return f"⚠️ MFA gaps ({len(gaps)} users):\n" + "\n".join(gaps)
 
 
 @mcp.tool()
@@ -484,11 +488,16 @@ if __name__ == "__main__":
     from starlette.routing import Route, Mount
     from starlette.requests import Request as StarletteRequest
 
+    if not MCP_AUTH_TOKEN:
+        raise SystemExit(
+            "MCP_AUTH_TOKEN is not set. This server can disable and delete user "
+            "accounts — refusing to start without an auth token rather than "
+            "allowing unauthenticated access."
+        )
+
     sse = SseServerTransport("/messages/")
 
     def _auth_ok(request) -> bool:
-        if not MCP_AUTH_TOKEN:
-            return True
         return request.headers.get("Authorization", "") == f"Bearer {MCP_AUTH_TOKEN}"
 
     async def health(request):

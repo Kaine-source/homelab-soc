@@ -38,6 +38,8 @@ Then ask **which signals they actually want**, since that decides which Graph pe
 | Recent sign-ins / sign-in failures | `AuditLog.Read.All` | Required |
 | Conditional Access policy state (incl. CA data attached to sign-ins) | `Policy.Read.All` | Required |
 | MFA registration / authentication method status | `UserAuthenticationMethod.Read.All` | Required |
+| User directory listing, stale-account detection, or per-user detail (`list_users`, `get_user`, `list_stale_users`, `check_mfa_gaps`) | `User.Read.All` | Required |
+| Disabling or deleting user accounts (`disable_user`, `delete_user`) | `User.ReadWrite.All` | Required |
 
 Walk them through: registering an app in Entra, adding only the application permissions for what they chose, granting admin consent, creating a client secret (or better, a certificate if they're comfortable with one), and noting down the tenant ID, client ID, and secret — into their `.env` file, never into the chat.
 
@@ -50,8 +52,8 @@ Ask if they want to self-host ntfy (needs a port reachable on their tailnet, mat
 Once the above is settled:
 
 1. Clone this repo.
-2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat.
-3. `docker compose up -d`.
+2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`.
+3. `docker compose up -d`, run once inside `mcp-tailscale/` and once inside `mcp-graph/` — there's no root-level compose file, so running it from the repo root won't find either.
 4. Check each container is healthy before moving on — don't let a silent failure in one service get blamed on another later.
 5. Confirm the dashboard loads over Tailscale from another device.
 
