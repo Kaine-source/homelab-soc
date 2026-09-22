@@ -1,0 +1,46 @@
+services:
+  mcp-tailscale:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - /home/kaine:/home/kaine
+      - /var/run/docker.sock:/var/run/docker.sock
+  dashboard:
+    build: .
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    restart: unless-stopped
+    command: python src/dashboard.py
+    volumes:
+      - ./src:/app/src
+
+  ntfy:
+    image: binwiederhier/ntfy
+    ports:
+      - "8082:80"
+    volumes:
+      - ntfy-data:/var/cache/ntfy
+    restart: unless-stopped
+    command: serve --cache-file /var/cache/ntfy/cache.db
+
+  alerter:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - NTFY_URL=http://ntfy:80
+      - NTFY_TOPIC=homelab-alerts
+      - POLL_INTERVAL=60
+    restart: unless-stopped
+    command: python -u src/alerter.py
+    depends_on:
+      - ntfy
+
+volumes:
+  ntfy-data:
