@@ -4,7 +4,7 @@ A real-time security operations centre running on a Raspberry Pi 4 — MCP serve
 
 Written up in full here: [Building a Homelab SOC on a Raspberry Pi with MCP and Microsoft Graph](https://cohenholmes.co.uk/blog/homelab-soc-raspberry-pi).
 
-> **Status:** the write-up describes a working v1. The source in this repo is being cleaned up for others to actually run before it lands here — this README exists so the link in the blog post has somewhere real to point to. Watch this space.
+> **Status:** the write-up describes a working v1, and the source for both MCP servers is now published here.
 
 ## Want to build your own?
 
