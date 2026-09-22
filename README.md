@@ -58,4 +58,4 @@ The alerter checks three things on independent schedules: a sign-in spike (>10 f
 
 ## License
 
-TBD — added once the source itself is published here.
+[MIT](./LICENSE)

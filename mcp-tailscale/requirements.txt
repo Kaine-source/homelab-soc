@@ -1,0 +1,6 @@
+mcp[cli]<2
+httpx
+python-dotenv
+uvicorn
+starlette
+docker
