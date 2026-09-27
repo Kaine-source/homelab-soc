@@ -783,7 +783,7 @@ async def posture(request):
         incomplete_banner = (
             '<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid #d29922;'
             'border-radius:6px;padding:.75rem 1rem;margin-bottom:1rem;font-size:.85rem;color:var(--muted)">'
-            f'⚠️ Score excludes unavailable data (no deduction applied, not treated as clean): {", ".join(unavailable)}.'
+            f'⚠️ Score assumes the worst case for unavailable data (not treated as clean): {", ".join(unavailable)}.'
             '</div>'
         )
 

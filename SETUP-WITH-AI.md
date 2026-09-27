@@ -39,7 +39,11 @@ Then ask **which signals they actually want**, since that decides which Graph pe
 | Conditional Access policy state (incl. CA data attached to sign-ins) | `Policy.Read.All` | Required |
 | MFA registration / authentication method status | `UserAuthenticationMethod.Read.All` | Required |
 | User directory listing, stale-account detection, or per-user detail (`list_users`, `get_user`, `list_stale_users`, `check_mfa_gaps`) | `User.Read.All` | Required |
-| Disabling or deleting user accounts (`disable_user`, `delete_user`) | `User.ReadWrite.All` | Required |
+| Disabling or deleting user accounts (`disable_user`, `delete_user`) | `User.ReadWrite.All`, `Directory.Read.All`, `Policy.Read.All`, `UserAuthenticationMethod.Read.All` | Required |
+
+That last row needs all four: `delete_user` always runs the same pre-deletion checklist itself before it will delete anything, and that checklist checks group memberships and app role assignments (`Directory.Read.All`), Conditional Access exclusions (`Policy.Read.All`) and registered auth methods (`UserAuthenticationMethod.Read.All`) as well as the account itself. Missing any of those turns into a permanent blocker on every deletion, not a one-off failure — so grant all four together, don't request `User.ReadWrite.All` alone expecting it to cover the rest.
+
+Two things the checklist can't check at all, regardless of permissions — Microsoft Graph doesn't support application-permission access to a user's owned objects or licence assignments. `pre_delete_check`/`delete_user` flag both as a fixed manual-review note rather than pretending to check them; tell them to look at the user's "Owned objects" and licence assignments in the Entra admin center themselves before deleting.
 
 Walk them through: registering an app in Entra, adding only the application permissions for what they chose, granting admin consent, creating a client secret (or better, a certificate if they're comfortable with one), and noting down the tenant ID, client ID, and secret — into their `.env` file, never into the chat.
 

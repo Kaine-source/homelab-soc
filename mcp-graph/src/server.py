@@ -46,13 +46,31 @@ mcp = FastMCP("Graph Monitor")
 
 
 def _is_protected(upn: str) -> bool:
-    """True if `upn` is a configured break-glass account, or matches the legacy
-    name-based heuristic. Callers must refuse the action either way — this is a
-    safety check, not a partial one."""
+    """True if the account identified by `upn` (a UPN or an object ID — Graph's user
+    endpoints accept either) is a configured break-glass account, or matches the legacy
+    name-based heuristic. Callers must refuse the action either way — this is a safety
+    check, not a partial one.
+
+    PROTECTED_UPNS might list a UPN while the caller passes the matching object ID, or
+    vice versa — a raw string comparison against just the caller's input would miss
+    that match entirely. So this resolves the account first and checks both its
+    canonical UPN and object ID against the configured set, not only whatever form the
+    caller happened to pass in.
+    """
     upn_lower = upn.lower()
     if upn_lower in PROTECTED_ACCOUNTS:
         return True
-    return any(x in upn_lower for x in ["break", "emergency"])
+    if any(x in upn_lower for x in ["break", "emergency"]):
+        return True
+    try:
+        resolved = graph_get(f"/users/{upn}?$select=id,userPrincipalName")
+    except Exception:
+        # Can't resolve the account at all — refuse rather than proceed on an identifier
+        # we couldn't verify isn't a configured break-glass account under another form.
+        return True
+    resolved_id  = (resolved.get("id") or "").lower()
+    resolved_upn = (resolved.get("userPrincipalName") or "").lower()
+    return resolved_id in PROTECTED_ACCOUNTS or resolved_upn in PROTECTED_ACCOUNTS
 
 
 def get_token() -> str:
@@ -370,21 +388,18 @@ def _run_pre_delete_checks(upn: str) -> tuple[list[str], int]:
         lines.append(f"\n[3] ❌ BLOCKER — could not fetch memberships, treated as unresolved: {e}")
         blockers += 1
 
-    # 4. Owned objects (groups, apps)
-    try:
-        owned = graph_get(f"/users/{upn}/ownedObjects?$select=displayName,id")
-        o_list = owned.get("value", [])
-        lines.append(f"\n[4] Owned Objects ({len(o_list)})")
-        if o_list:
-            for o in o_list:
-                lines.append(f"    • {o.get('displayName','?')} [{o.get('@odata.type','?').split('.')[-1]}]")
-            lines.append(f"    ❌ BLOCKER — Transfer ownership before deleting.")
-            blockers += 1
-        else:
-            lines.append(f"    ✅ No owned groups or applications.")
-    except Exception as e:
-        lines.append(f"\n[4] ❌ BLOCKER — could not fetch owned objects, treated as unresolved: {e}")
-        blockers += 1
+    # 4. Owned objects (groups, apps) — GET /users/{id}/ownedObjects does not support
+    # application permissions at all (confirmed against Microsoft's own Graph API
+    # reference: "Application: Not supported" — no permission grant makes this call
+    # work for this server's client-credentials auth). Treating a guaranteed failure
+    # here as a blocker would mean delete_user can never proceed for anyone, which is
+    # not a safety improvement — it's the checklist becoming permanently unusable. So
+    # this is reported as a fixed manual-review caveat, never attempted, never a
+    # blocker, rather than as a check that "failed".
+    lines.append(f"\n[4] Owned Objects")
+    lines.append(f"    ⚠️  REVIEW — Not checked here: the Graph API for this doesn't support the")
+    lines.append(f"    application-permission auth this server uses. Check the user's 'Owned")
+    lines.append(f"    objects' tab in the Entra admin center manually before deleting.")
 
     # 5. App role assignments
     try:
@@ -401,29 +416,24 @@ def _run_pre_delete_checks(upn: str) -> tuple[list[str], int]:
         lines.append(f"\n[5] ❌ BLOCKER — could not fetch app roles, treated as unresolved: {e}")
         blockers += 1
 
-    # 6. Licence assignments
-    try:
-        lic = graph_get(f"/users/{upn}/licenseDetails?$select=skuPartNumber")
-        l_list = lic.get("value", [])
-        lines.append(f"\n[6] Licence Assignments ({len(l_list)})")
-        if l_list:
-            for l in l_list:
-                lines.append(f"    • {l.get('skuPartNumber','?')}")
-            lines.append(f"    ⚠️  REVIEW — Remove licences before deletion to recover them.")
-        else:
-            lines.append(f"    ✅ No licences assigned.")
-    except Exception as e:
-        lines.append(f"\n[6] ❌ BLOCKER — could not fetch licences, treated as unresolved: {e}")
-        blockers += 1
+    # 6. Licence assignments — same platform limit as section 4: GET /users/{id}/
+    # licenseDetails is documented "Not supported" for application permissions, so it's
+    # never attempted here either. See the comment on section 4 for why that means a
+    # fixed caveat rather than a blocker.
+    lines.append(f"\n[6] Licence Assignments")
+    lines.append(f"    ⚠️  REVIEW — Not checked here: the Graph API for this doesn't support the")
+    lines.append(f"    application-permission auth this server uses. Check the user's assigned")
+    lines.append(f"    licences in the Entra admin center manually before deleting, to recover them.")
 
     # 7. CA policy exclusions
     try:
         ca = graph_get("/identity/conditionalAccess/policies?$select=displayName,conditions")
         ca_hits = []
-        try:
-            uid = graph_get(f"/users/{upn}?$select=id").get("id","")
-        except:
-            uid = ""
+        # No nested try/except here: if this lookup fails, the outer except below must
+        # see it and count it as a blocker — swallowing it would leave uid="" (falsy),
+        # which "if uid and uid in excl" then reads as "not excluded from anything",
+        # a false-clean answer produced by a failed query rather than a real check.
+        uid = graph_get(f"/users/{upn}?$select=id").get("id", "")
         for p in ca.get("value", []):
             excl = p.get("conditions",{}).get("users",{}).get("excludeUsers",[])
             if uid and uid in excl:
@@ -501,11 +511,14 @@ def delete_user(upn: str, confirm: bool = False) -> str:
 def pre_delete_check(upn: str) -> str:
     """Run a pre-deletion checklist for a user account before disabling or deleting.
 
-    Checks: account type/IDP, last sign-in, group memberships, owned objects,
-    app role assignments, licence assignments, CA policy exclusions, and auth methods.
-    Returns a structured report with CLEAR / REVIEW / BLOCKER status per item. A check
-    that fails to run is reported as a BLOCKER, not skipped, since an unanswered
-    question is not a clear answer.
+    Checks: account type/IDP, last sign-in, group memberships, app role assignments,
+    CA policy exclusions, and auth methods. Returns a structured report with
+    CLEAR / REVIEW / BLOCKER status per item. A check that fails to run is reported
+    as a BLOCKER, not skipped, since an unanswered question is not a clear answer —
+    except owned objects and licence assignments, which Microsoft Graph doesn't support
+    checking under this server's application-permission auth at all; those are always
+    flagged REVIEW with a note to check them manually, never attempted and never a
+    blocker (see the code comments on those two sections for why).
     delete_user runs this same checklist itself before deleting, so this tool is for
     your own review rather than a prerequisite you must remember to run first.
     """
