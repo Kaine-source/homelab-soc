@@ -31,7 +31,28 @@ MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 GRAPH_URL      = "https://graph.microsoft.com/v1.0"
 TOKEN_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
+# Comma-separated UPNs (or object IDs) of break-glass/emergency-access accounts, e.g.
+# "breakglass1@contoso.onmicrosoft.com,breakglass2@contoso.onmicrosoft.com". This is the
+# authoritative protection: an exact match, configured by the tenant owner. The UPN-
+# substring heuristic below (upn contains "break"/"emergency") is kept only as an
+# additional net for an unconfigured deployment — it is not a substitute for this list,
+# since it both over-matches (a legitimately named "breakout-room@..." account) and
+# under-matches (a break-glass account not named with those words).
+PROTECTED_ACCOUNTS = {
+    a.strip().lower() for a in os.getenv("PROTECTED_UPNS", "").split(",") if a.strip()
+}
+
 mcp = FastMCP("Graph Monitor")
+
+
+def _is_protected(upn: str) -> bool:
+    """True if `upn` is a configured break-glass account, or matches the legacy
+    name-based heuristic. Callers must refuse the action either way — this is a
+    safety check, not a partial one."""
+    upn_lower = upn.lower()
+    if upn_lower in PROTECTED_ACCOUNTS:
+        return True
+    return any(x in upn_lower for x in ["break", "emergency"])
 
 
 def get_token() -> str:
@@ -255,12 +276,12 @@ def disable_user(upn: str) -> str:
     """Disable a user account in Entra ID (reversible — sets accountEnabled to false).
 
     Use this before delete_user to soft-disable first. Safe to undo via the portal.
-    Will refuse to disable BreakGlass or any account whose UPN contains 'break' or 'emergency'.
+    Will refuse to disable a configured or apparent break-glass account.
     """
     logger.info(f"disable_user called: {upn}")
     _log_action("disable_user", {"upn": upn})
-    if any(x in upn.lower() for x in ["break", "emergency"]):
-        return f"🚫 Refused: '{upn}' looks like a break-glass account. Disable it manually in the portal."
+    if _is_protected(upn):
+        return f"🚫 Refused: '{upn}' is a protected break-glass account. Disable it manually in the portal."
     try:
         token = get_token()
         with httpx.Client() as client:
@@ -279,61 +300,17 @@ def disable_user(upn: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
-def delete_user(upn: str, confirm: bool = False) -> str:
-    """Permanently delete a user from Entra ID.
+def _run_pre_delete_checks(upn: str) -> tuple[list[str], int]:
+    """Run the pre-deletion checklist and return (report_lines, blockers).
 
-    This is irreversible (soft-deleted for 30 days, then gone).
-    Pass confirm=True to execute. Without it, returns a safety summary only.
-    Recommend running disable_user first to verify the account is no longer needed.
-    Will refuse to delete BreakGlass or any account whose UPN contains 'break' or 'emergency'.
+    A check section that raises is treated as a BLOCKER, not skipped with a soft
+    warning — an unanswered question about a user's account (still enabled? AD
+    synced? owns objects?) is exactly as unsafe to delete through as a known-bad
+    answer, so it must count the same way. This is what makes blockers==0 mean
+    "every check ran and came back clear", not "every check that happened to
+    succeed came back clear" — the distinction delete_user's enforcement below
+    relies on.
     """
-    logger.info(f"delete_user called: {upn}, confirm={confirm}")
-    _log_action("delete_user", {"upn": upn, "confirm": confirm})
-    if any(x in upn.lower() for x in ["break", "emergency"]):
-        return f"🚫 Refused: '{upn}' looks like a break-glass account. Delete it manually in the portal if truly needed."
-    if not confirm:
-        # Fetch current state so user can verify before confirming
-        try:
-            user = graph_get(f"/users/{upn}?$select=displayName,userPrincipalName,accountEnabled,lastPasswordChangeDateTime")
-            enabled = "⚠️ STILL ENABLED" if user.get("accountEnabled") else "✅ disabled"
-            return (
-                f"⚠️  DRY RUN — no changes made.\n"
-                f"Target: {user.get('displayName')} ({user.get('userPrincipalName')})\n"
-                f"Account status: {enabled}\n"
-                f"Last password change: {user.get('lastPasswordChangeDateTime', 'N/A')}\n\n"
-                f"To permanently delete, call again with confirm=True.\n"
-                f"Tip: run disable_user first if account is still enabled."
-            )
-        except Exception as e:
-            return f"Could not fetch user details: {e}"
-    try:
-        token = get_token()
-        with httpx.Client() as client:
-            r = client.delete(
-                f"{GRAPH_URL}/users/{upn}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=15,
-            )
-            if r.status_code == 204:
-                return f"✅ '{upn}' permanently deleted (soft-deleted for 30 days — recoverable from Entra > Deleted users until then)."
-            else:
-                return f"❌ Failed ({r.status_code}): {r.text}"
-    except Exception as e:
-        logger.error(f"delete_user error: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def pre_delete_check(upn: str) -> str:
-    """Run a pre-deletion checklist for a user account before disabling or deleting.
-
-    Checks: account type/IDP, last sign-in, group memberships, owned objects,
-    app role assignments, licence assignments, CA policy exclusions, and auth methods.
-    Returns a structured report with CLEAR / REVIEW / BLOCKER status per item.
-    Always run this before disable_user or delete_user.
-    """
-    _log_action("pre_delete_check", {"upn": upn})
     lines = [f"Pre-Deletion Checklist: {upn}", "=" * 60]
     blockers = 0
 
@@ -371,7 +348,8 @@ def pre_delete_check(upn: str) -> str:
         else:
             lines.append(f"    ✅ Cloud-only Entra ID account — safe to delete here.")
     except Exception as e:
-        lines.append(f"\n[1-2] ❌ Could not fetch account details: {e}")
+        lines.append(f"\n[1-2] ❌ BLOCKER — could not fetch account details, treated as unresolved: {e}")
+        blockers += 1
 
     # 3. Group memberships
     try:
@@ -389,7 +367,8 @@ def pre_delete_check(upn: str) -> str:
         else:
             lines.append(f"    ✅ No group memberships.")
     except Exception as e:
-        lines.append(f"\n[3] ⚠️  Could not fetch memberships: {e}")
+        lines.append(f"\n[3] ❌ BLOCKER — could not fetch memberships, treated as unresolved: {e}")
+        blockers += 1
 
     # 4. Owned objects (groups, apps)
     try:
@@ -404,7 +383,8 @@ def pre_delete_check(upn: str) -> str:
         else:
             lines.append(f"    ✅ No owned groups or applications.")
     except Exception as e:
-        lines.append(f"\n[4] ⚠️  Could not fetch owned objects: {e}")
+        lines.append(f"\n[4] ❌ BLOCKER — could not fetch owned objects, treated as unresolved: {e}")
+        blockers += 1
 
     # 5. App role assignments
     try:
@@ -418,7 +398,8 @@ def pre_delete_check(upn: str) -> str:
         else:
             lines.append(f"    ✅ No app role assignments.")
     except Exception as e:
-        lines.append(f"\n[5] ⚠️  Could not fetch app roles: {e}")
+        lines.append(f"\n[5] ❌ BLOCKER — could not fetch app roles, treated as unresolved: {e}")
+        blockers += 1
 
     # 6. Licence assignments
     try:
@@ -432,7 +413,8 @@ def pre_delete_check(upn: str) -> str:
         else:
             lines.append(f"    ✅ No licences assigned.")
     except Exception as e:
-        lines.append(f"\n[6] ⚠️  Could not fetch licences: {e}")
+        lines.append(f"\n[6] ❌ BLOCKER — could not fetch licences, treated as unresolved: {e}")
+        blockers += 1
 
     # 7. CA policy exclusions
     try:
@@ -454,7 +436,8 @@ def pre_delete_check(upn: str) -> str:
         else:
             lines.append(f"    ✅ Not directly excluded from any CA policies.")
     except Exception as e:
-        lines.append(f"\n[7] ⚠️  Could not check CA exclusions: {e}")
+        lines.append(f"\n[7] ❌ BLOCKER — could not check CA exclusions, treated as unresolved: {e}")
+        blockers += 1
 
     # 8. Auth methods
     try:
@@ -464,9 +447,71 @@ def pre_delete_check(upn: str) -> str:
         lines.append(f"    {', '.join(m_list) if m_list else '—'}")
         lines.append(f"    ✅ Will be cleared on deletion.")
     except Exception as e:
-        lines.append(f"\n[8] ⚠️  Could not fetch auth methods: {e}")
+        lines.append(f"\n[8] ❌ BLOCKER — could not fetch auth methods, treated as unresolved: {e}")
+        blockers += 1
 
-    # Summary
+    return lines, blockers
+
+
+@mcp.tool()
+def delete_user(upn: str, confirm: bool = False) -> str:
+    """Permanently delete a user from Entra ID.
+
+    This is irreversible (soft-deleted for 30 days, then gone). Always runs the same
+    checklist as pre_delete_check first, live — it does not trust that pre_delete_check
+    was called earlier or that its result still holds. Any blocker (including a check
+    that fails to run) refuses the deletion, confirm=True or not.
+    Pass confirm=True to execute once there are no blockers. Without it, returns the
+    checklist as a dry run only.
+    Will refuse to delete a configured or apparent break-glass account.
+    """
+    logger.info(f"delete_user called: {upn}, confirm={confirm}")
+    _log_action("delete_user", {"upn": upn, "confirm": confirm})
+    if _is_protected(upn):
+        return f"🚫 Refused: '{upn}' is a protected break-glass account. Delete it manually in the portal if truly needed."
+
+    lines, blockers = _run_pre_delete_checks(upn)
+    lines.append(f"\n{'=' * 60}")
+    if blockers:
+        lines.append(f"❌ {blockers} BLOCKER(S) found — refusing to delete. Resolve these first, then re-run.")
+        return "\n".join(lines)
+    if not confirm:
+        lines.append("✅ No blockers found.")
+        lines.append(f"⚠️  DRY RUN — no changes made. Call again with confirm=True to permanently delete '{upn}'.")
+        return "\n".join(lines)
+
+    try:
+        token = get_token()
+        with httpx.Client() as client:
+            r = client.delete(
+                f"{GRAPH_URL}/users/{upn}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15,
+            )
+            if r.status_code == 204:
+                return f"✅ '{upn}' permanently deleted (soft-deleted for 30 days — recoverable from Entra > Deleted users until then)."
+            else:
+                return f"❌ Failed ({r.status_code}): {r.text}"
+    except Exception as e:
+        logger.error(f"delete_user error: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def pre_delete_check(upn: str) -> str:
+    """Run a pre-deletion checklist for a user account before disabling or deleting.
+
+    Checks: account type/IDP, last sign-in, group memberships, owned objects,
+    app role assignments, licence assignments, CA policy exclusions, and auth methods.
+    Returns a structured report with CLEAR / REVIEW / BLOCKER status per item. A check
+    that fails to run is reported as a BLOCKER, not skipped, since an unanswered
+    question is not a clear answer.
+    delete_user runs this same checklist itself before deleting, so this tool is for
+    your own review rather than a prerequisite you must remember to run first.
+    """
+    _log_action("pre_delete_check", {"upn": upn})
+    lines, blockers = _run_pre_delete_checks(upn)
+
     lines.append(f"\n{'=' * 60}")
     if blockers:
         lines.append(f"❌ {blockers} BLOCKER(S) found — resolve before deleting.")

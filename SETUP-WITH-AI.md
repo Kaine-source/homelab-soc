@@ -43,6 +43,8 @@ Then ask **which signals they actually want**, since that decides which Graph pe
 
 Walk them through: registering an app in Entra, adding only the application permissions for what they chose, granting admin consent, creating a client secret (or better, a certificate if they're comfortable with one), and noting down the tenant ID, client ID, and secret — into their `.env` file, never into the chat.
 
+If they chose `disable_user`/`delete_user`, also have them list their break-glass/emergency-access account UPNs now, for `PROTECTED_UPNS` in Phase 5 — `disable_user` and `delete_user` refuse to act on anything in that list, and it needs to be set before those tools are used, not after.
+
 ### Phase 4 — Notifications
 
 Ask if they want to self-host ntfy (needs a port reachable on their tailnet, matching the original setup) or just use the public ntfy.sh server with a private topic name. Either works; the tradeoff is self-hosting keeps notification content fully private, the public server is zero setup.
@@ -52,7 +54,7 @@ Ask if they want to self-host ntfy (needs a port reachable on their tailnet, mat
 Once the above is settled:
 
 1. Clone this repo.
-2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`. In both files, also set `BIND_ADDR` to their Pi's (or other host's) Tailscale IP — have them run `tailscale ip -4` and paste the result in. Left at the `.env.example` default of `127.0.0.1`, every port stays loopback-only and nothing in Phase 5 or 6 will be reachable from another tailnet device.
+2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`. In both files, also set `BIND_ADDR` to their Pi's (or other host's) Tailscale IP — have them run `tailscale ip -4` and paste the result in. Left at the `.env.example` default of `127.0.0.1`, every port stays loopback-only and nothing in Phase 5 or 6 will be reachable from another tailnet device. If they chose the account-mutation tools in Phase 3, also set `PROTECTED_UPNS` in `mcp-graph/.env` to the break-glass UPNs they listed then.
 3. `docker compose up -d`, run once inside `mcp-tailscale/` and once inside `mcp-graph/` — there's no root-level compose file, so running it from the repo root won't find either.
 4. Check each container is healthy before moving on — don't let a silent failure in one service get blamed on another later.
 5. Confirm the dashboard loads over Tailscale from another device.
