@@ -52,7 +52,7 @@ Ask if they want to self-host ntfy (needs a port reachable on their tailnet, mat
 Once the above is settled:
 
 1. Clone this repo.
-2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`.
+2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`. In both files, also set `BIND_ADDR` to their Pi's (or other host's) Tailscale IP — have them run `tailscale ip -4` and paste the result in. Left at the `.env.example` default of `127.0.0.1`, every port stays loopback-only and nothing in Phase 5 or 6 will be reachable from another tailnet device.
 3. `docker compose up -d`, run once inside `mcp-tailscale/` and once inside `mcp-graph/` — there's no root-level compose file, so running it from the repo root won't find either.
 4. Check each container is healthy before moving on — don't let a silent failure in one service get blamed on another later.
 5. Confirm the dashboard loads over Tailscale from another device.
