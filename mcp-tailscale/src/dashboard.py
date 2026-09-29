@@ -242,6 +242,7 @@ async def overview(request):
         users, total_users = [], 0
 
     sign_ins = []
+    signins_ok = True
     try:
         logs = graph_get("/auditLogs/signIns?$top=200&$select=userPrincipalName,createdDateTime,status")
         sign_ins = logs.get("value", [])
@@ -249,6 +250,7 @@ async def overview(request):
         failed_pct = round(failed/len(sign_ins)*100) if sign_ins else 0
     except:
         failed, failed_pct = 0, 0
+        signins_ok = False
 
     try:
         cutoff7 = (datetime.now(timezone.utc)-timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -275,7 +277,7 @@ async def overview(request):
         ("Online Now",      online,       "connected to control",                 "c-green"),
         ("Offline",         offline,      "not connected",                        "c-red" if offline else "c-muted"),
         ("Entra Users",     total_users,  "enabled accounts",                     "c-blue"),
-        ("Failed Sign-ins", failed,       f"{failed_pct}% of last {len(sign_ins)} attempts",  "c-amber" if failed else "c-green"),
+        ("Failed Sign-ins", failed if signins_ok else "—", f"{failed_pct}% of last {len(sign_ins)} attempts" if signins_ok else "data unavailable", "c-muted" if not signins_ok else "c-amber" if failed else "c-green"),
         ("Audit Events",    audit_count,  f"last 7 days · {audit_fail} failures", "c-purple"),
         ("MCP Actions",     action_count, "tool calls today",                     "c-blue"),
     ]
@@ -306,6 +308,7 @@ async def overview(request):
         hours_j, ok_j, fail_j = "[]","[]","[]"
 
     # Security summary data
+    mfa_ok = True
     try:
         auth_data = graph_get("/reports/authenticationMethods/userRegistrationDetails?$select=userPrincipalName,isMfaRegistered")
         auth_users = auth_data.get("value", [])
@@ -317,7 +320,9 @@ async def overview(request):
         mfa_at_risk = sum(1 for u in auth_users if not u.get("isMfaRegistered", False) and u.get("userPrincipalName","") not in disabled_upns)
     except:
         mfa_at_risk = 0
+        mfa_ok = False
 
+    ca_ok = True
     try:
         ca_data = graph_get("/identity/conditionalAccess/policies?$select=state")
         ca_all = ca_data.get("value", [])
@@ -326,18 +331,41 @@ async def overview(request):
         ca_total = len(ca_all)
     except:
         ca_enabled, ca_ro, ca_total = 0, 0, 0
+        ca_ok = False
 
+    # Each factor below only contributes points when its own query actually succeeded —
+    # a failed query must never read as "healthy" just because its fallback value (0) also
+    # happens to be the value that scores well. Failed factors score 0, not the healthy
+    # default, and are named in incomplete_banner below so the gap is visible, not silent.
+    unavailable = []
     posture_score = 0
-    if ca_enabled >= 3: posture_score += 40
-    elif ca_enabled >= 1: posture_score += 20
-    if mfa_at_risk == 0: posture_score += 40
-    elif mfa_at_risk <= 2: posture_score += 20
-    if failed_pct < 5: posture_score += 20
+    if ca_ok:
+        if ca_enabled >= 3: posture_score += 40
+        elif ca_enabled >= 1: posture_score += 20
+    else:
+        unavailable.append("Conditional Access policy state")
+    if mfa_ok:
+        if mfa_at_risk == 0: posture_score += 40
+        elif mfa_at_risk <= 2: posture_score += 20
+    else:
+        unavailable.append("MFA registration report")
+    if signins_ok:
+        if failed_pct < 5: posture_score += 20
+    else:
+        unavailable.append("sign-in logs")
     score_col = "c-green" if posture_score >= 80 else "c-amber" if posture_score >= 50 else "c-red"
-    mfa_col = "c-green" if mfa_at_risk == 0 else "c-amber" if mfa_at_risk <= 2 else "c-red"
-    ca_col  = "c-green" if ca_ro == 0 else "c-amber"
+    mfa_col = "c-muted" if not mfa_ok else "c-green" if mfa_at_risk == 0 else "c-amber" if mfa_at_risk <= 2 else "c-red"
+    ca_col  = "c-muted" if not ca_ok else "c-green" if ca_ro == 0 else "c-amber"
+    incomplete_banner = ""
+    if unavailable:
+        incomplete_banner = (
+            '<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid #d29922;'
+            'border-radius:6px;padding:.75rem 1rem;margin-bottom:1rem;font-size:.85rem;color:var(--muted)">'
+            f'⚠️ Score excludes unavailable data (scored as 0, not healthy): {", ".join(unavailable)}.'
+            '</div>'
+        )
 
-    security_summary = f"""<div class="stats-grid" style="margin-bottom:1.5rem">
+    security_summary = f"""{incomplete_banner}<div class="stats-grid" style="margin-bottom:1.5rem">
   <a href="/posture" class="stat-card" style="text-decoration:none;cursor:pointer">
     <div class="stat-label">Posture Score</div>
     <div class="stat-value {score_col}">{posture_score}<span style="font-size:.9rem;color:var(--muted)">/100</span></div>
@@ -345,8 +373,8 @@ async def overview(request):
   </a>
   <a href="/users?mfa=no&amp;status=enabled" class="stat-card" style="text-decoration:none;cursor:pointer">
     <div class="stat-label">MFA At-Risk</div>
-    <div class="stat-value {mfa_col}">{mfa_at_risk}</div>
-    <div class="stat-sub">enabled users without MFA</div>
+    <div class="stat-value {mfa_col}">{mfa_at_risk if mfa_ok else "—"}</div>
+    <div class="stat-sub">{"enabled users without MFA" if mfa_ok else "data unavailable"}</div>
   </a>
   <a href="/posture" class="stat-card" style="text-decoration:none;cursor:pointer">
     <div class="stat-label">CA Policies</div>
@@ -665,13 +693,16 @@ async def actions(request):
 # ── Security Posture ──────────────────────────────────────────────────────────────
 
 async def posture(request):
+    devices_ok = True
     try:
         devices = get_devices()
         online  = sum(1 for d in devices if d.get("connectedToControl"))
         offline = len(devices) - online
     except:
         devices, online, offline = [], 0, 0
+        devices_ok = False
 
+    ca_ok = True
     try:
         ca_data     = graph_get("/identity/conditionalAccess/policies?$select=displayName,state")
         ca_policies = ca_data.get("value", [])
@@ -679,7 +710,9 @@ async def posture(request):
         enabled_ca  = [p for p in ca_policies if p.get("state") == "enabled"]
     except:
         ca_policies, report_only, enabled_ca = [], [], []
+        ca_ok = False
 
+    mfa_ok = True
     try:
         auth_data  = graph_get("/reports/authenticationMethods/userRegistrationDetails?$select=userPrincipalName,displayName,isMfaRegistered,methodsRegistered,isAdmin")
         auth_users = auth_data.get("value", [])
@@ -692,7 +725,9 @@ async def posture(request):
         mfa_gaps = [u for u in auth_users if not u.get("isMfaRegistered", False) and u.get("userPrincipalName","") not in disabled_upns]
     except:
         auth_users, mfa_gaps, disabled_upns = [], [], set()
+        mfa_ok = False
 
+    signins_ok = True
     sign_ins_p, failed_si, fail_rate = [], 0, 0
     try:
         sl = graph_get("/auditLogs/signIns?$top=200&$select=status")
@@ -700,39 +735,75 @@ async def posture(request):
         failed_si  = sum(1 for e in sign_ins_p if e.get("status", {}).get("errorCode", 0) != 0)
         fail_rate  = round(failed_si / len(sign_ins_p) * 100) if sign_ins_p else 0
     except:
-        pass
+        signins_ok = False
 
-    # Score
+    # Score starts at 100 and only takes deductions — which means a query that fails
+    # and finds nothing to deduct is indistinguishable from a query that succeeded and
+    # found zero problems. Both look "clean". So an unavailable factor is scored as its
+    # own worst case (the same deduction a real finding would cause), not left alone —
+    # unknown must never score better than known-bad. unavailable/incomplete_banner
+    # names which factors that applies to, so the drop isn't unexplained.
+    unavailable = []
     score, deductions = 100, []
-    ro_ded = min(len(report_only) * 8, 40)
-    if ro_ded:
-        score -= ro_ded
-        deductions.append(f"{len(report_only)} report-only CA polic{'y' if len(report_only)==1 else 'ies'} (-{ro_ded})")
-    mfa_ded = min(len(mfa_gaps) * 8, 32)
-    if mfa_ded:
-        score -= mfa_ded
-        deductions.append(f"{len(mfa_gaps)} user{'s' if len(mfa_gaps)!=1 else ''} without MFA (-{mfa_ded})")
-    if fail_rate > 10:
-        score -= 10; deductions.append(f"High sign-in failure rate ({fail_rate}%) (-10)")
-    elif fail_rate > 5:
-        score -= 5;  deductions.append(f"Elevated sign-in failure rate ({fail_rate}%) (-5)")
-    off_ded = min(offline * 2, 10)
-    if off_ded:
-        score -= off_ded
-        deductions.append(f"{offline} offline Tailscale node{'s' if offline!=1 else ''} (-{off_ded})")
+    if ca_ok:
+        ro_ded = min(len(report_only) * 8, 40)
+        if ro_ded:
+            score -= ro_ded
+            deductions.append(f"{len(report_only)} report-only CA polic{'y' if len(report_only)==1 else 'ies'} (-{ro_ded})")
+    else:
+        unavailable.append("Conditional Access policy state")
+        score -= 40
+    if mfa_ok:
+        mfa_ded = min(len(mfa_gaps) * 8, 32)
+        if mfa_ded:
+            score -= mfa_ded
+            deductions.append(f"{len(mfa_gaps)} user{'s' if len(mfa_gaps)!=1 else ''} without MFA (-{mfa_ded})")
+    else:
+        unavailable.append("MFA registration report")
+        score -= 32
+    if signins_ok:
+        if fail_rate > 10:
+            score -= 10; deductions.append(f"High sign-in failure rate ({fail_rate}%) (-10)")
+        elif fail_rate > 5:
+            score -= 5;  deductions.append(f"Elevated sign-in failure rate ({fail_rate}%) (-5)")
+    else:
+        unavailable.append("sign-in logs")
+        score -= 10
+    if devices_ok:
+        off_ded = min(offline * 2, 10)
+        if off_ded:
+            score -= off_ded
+            deductions.append(f"{offline} offline Tailscale node{'s' if offline!=1 else ''} (-{off_ded})")
+    else:
+        unavailable.append("Tailscale device status")
+        score -= 10
     score = max(0, score)
+    incomplete_banner = ""
+    if unavailable:
+        incomplete_banner = (
+            '<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid #d29922;'
+            'border-radius:6px;padding:.75rem 1rem;margin-bottom:1rem;font-size:.85rem;color:var(--muted)">'
+            f'⚠️ Score assumes the worst case for unavailable data (not treated as clean): {", ".join(unavailable)}.'
+            '</div>'
+        )
 
     if score >= 90:   score_cls, score_label = "c-green", "Good — minor improvements recommended"
     elif score >= 70: score_cls, score_label = "c-amber", "Fair — some issues need attention"
     elif score >= 50: score_cls, score_label = "c-red",   "Poor — action required"
     else:             score_cls, score_label = "c-red",   "Critical — immediate action needed"
 
+    no_deductions_label = (
+        "✅ No deductions from the data that was available"
+        if unavailable else
+        "✅ No deductions — looking good"
+    )
     ded_items = "".join(
         f'<li style="margin:.3rem 0;color:var(--muted);font-size:.8rem">⚠️ {d}</li>'
         for d in deductions
-    ) or '<li style="color:var(--green);font-size:.8rem">✅ No deductions — looking good</li>'
+    ) or f'<li style="color:var(--green);font-size:.8rem">{no_deductions_label}</li>'
 
     score_card = (
+        f'{incomplete_banner}'
         '<div style="display:grid;grid-template-columns:140px 1fr;gap:1.5rem;align-items:center;'
         'background:var(--surface);border:1px solid var(--border);border-radius:8px;'
         'padding:1.75rem;margin-bottom:1.75rem">'
@@ -744,17 +815,27 @@ async def posture(request):
     )
 
     covered = len(auth_users) - len(mfa_gaps)
-    ca_c  = "c-green" if not report_only else ("c-amber" if len(report_only) <= 2 else "c-red")
-    mfa_c = "c-green" if not mfa_gaps   else ("c-amber" if len(mfa_gaps) <= 2   else "c-red")
-    si_c  = "c-green" if fail_rate <= 5 else ("c-amber" if fail_rate <= 10      else "c-red")
-    off_c = "c-green" if not offline    else ("c-amber" if offline <= 1         else "c-red")
+    ca_c  = "c-muted" if not ca_ok      else "c-green" if not report_only else ("c-amber" if len(report_only) <= 2 else "c-red")
+    mfa_c = "c-muted" if not mfa_ok     else "c-green" if not mfa_gaps   else ("c-amber" if len(mfa_gaps) <= 2   else "c-red")
+    si_c  = "c-muted" if not signins_ok else "c-green" if fail_rate <= 5 else ("c-amber" if fail_rate <= 10      else "c-red")
+    off_c = "c-muted" if not devices_ok else "c-green" if not offline    else ("c-amber" if offline <= 1         else "c-red")
+
+    ca_val   = str(len(report_only)) if ca_ok else "—"
+    ca_sub   = f"{len(enabled_ca)} enforced · {len(ca_policies)} total" if ca_ok else "data unavailable"
+    mfa_val  = f"{covered}/{len(auth_users)}" if mfa_ok else "—"
+    mfa_plural = "s" if len(mfa_gaps) != 1 else ""
+    mfa_sub  = f"{len(mfa_gaps)} gap{mfa_plural} found" if mfa_ok else "data unavailable"
+    si_val   = f"{fail_rate}%" if signins_ok else "—"
+    si_sub   = f"{failed_si} of {len(sign_ins_p)} recent attempts" if signins_ok else "data unavailable"
+    off_val  = str(offline) if devices_ok else "—"
+    off_sub  = f"{online} of {len(devices)} online" if devices_ok else "data unavailable"
 
     factor_cards = (
         '<div class="stats-grid" style="margin-bottom:1.75rem">'
-        f'<div class="stat-card"><div class="stat-label">Report-only Policies</div><div class="stat-value {ca_c}">{len(report_only)}</div><div class="stat-sub">{len(enabled_ca)} enforced · {len(ca_policies)} total</div></div>'
-        f'<div class="stat-card"><div class="stat-label">MFA Coverage</div><div class="stat-value {mfa_c}">{covered}/{len(auth_users)}</div><div class="stat-sub">{len(mfa_gaps)} gap{"s" if len(mfa_gaps)!=1 else ""} found</div></div>'
-        f'<div class="stat-card"><div class="stat-label">Sign-in Failure Rate</div><div class="stat-value {si_c}">{fail_rate}%</div><div class="stat-sub">{failed_si} of {len(sign_ins_p)} recent attempts</div></div>'
-        f'<div class="stat-card"><div class="stat-label">Offline Nodes</div><div class="stat-value {off_c}">{offline}</div><div class="stat-sub">{online} of {len(devices)} online</div></div>'
+        f'<div class="stat-card"><div class="stat-label">Report-only Policies</div><div class="stat-value {ca_c}">{ca_val}</div><div class="stat-sub">{ca_sub}</div></div>'
+        f'<div class="stat-card"><div class="stat-label">MFA Coverage</div><div class="stat-value {mfa_c}">{mfa_val}</div><div class="stat-sub">{mfa_sub}</div></div>'
+        f'<div class="stat-card"><div class="stat-label">Sign-in Failure Rate</div><div class="stat-value {si_c}">{si_val}</div><div class="stat-sub">{si_sub}</div></div>'
+        f'<div class="stat-card"><div class="stat-label">Offline Nodes</div><div class="stat-value {off_c}">{off_val}</div><div class="stat-sub">{off_sub}</div></div>'
         '</div>'
     )
 

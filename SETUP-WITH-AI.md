@@ -39,9 +39,15 @@ Then ask **which signals they actually want**, since that decides which Graph pe
 | Conditional Access policy state (incl. CA data attached to sign-ins) | `Policy.Read.All` | Required |
 | MFA registration / authentication method status | `UserAuthenticationMethod.Read.All` | Required |
 | User directory listing, stale-account detection, or per-user detail (`list_users`, `get_user`, `list_stale_users`, `check_mfa_gaps`) | `User.Read.All` | Required |
-| Disabling or deleting user accounts (`disable_user`, `delete_user`) | `User.ReadWrite.All` | Required |
+| Disabling or deleting user accounts (`disable_user`, `delete_user`) | `User.ReadWrite.All`, `Directory.Read.All`, `Policy.Read.All`, `UserAuthenticationMethod.Read.All` | Required |
+
+That last row needs all four: `delete_user` always runs the same pre-deletion checklist itself before it will delete anything, and that checklist checks group memberships and app role assignments (`Directory.Read.All`), Conditional Access exclusions (`Policy.Read.All`) and registered auth methods (`UserAuthenticationMethod.Read.All`) as well as the account itself. Missing any of those turns into a permanent blocker on every deletion, not a one-off failure — so grant all four together, don't request `User.ReadWrite.All` alone expecting it to cover the rest.
+
+Two things the checklist can't check at all, regardless of permissions — Microsoft Graph doesn't support application-permission access to a user's owned objects or licence assignments. `pre_delete_check`/`delete_user` flag both as a fixed manual-review note rather than pretending to check them; tell them to look at the user's "Owned objects" and licence assignments in the Entra admin center themselves before deleting.
 
 Walk them through: registering an app in Entra, adding only the application permissions for what they chose, granting admin consent, creating a client secret (or better, a certificate if they're comfortable with one), and noting down the tenant ID, client ID, and secret — into their `.env` file, never into the chat.
+
+If they chose `disable_user`/`delete_user`, also have them list their break-glass/emergency-access account UPNs now, for `PROTECTED_UPNS` in Phase 5 — `disable_user` and `delete_user` refuse to act on anything in that list, and it needs to be set before those tools are used, not after.
 
 ### Phase 4 — Notifications
 
@@ -52,7 +58,7 @@ Ask if they want to self-host ntfy (needs a port reachable on their tailnet, mat
 Once the above is settled:
 
 1. Clone this repo.
-2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`. In both files, also set `BIND_ADDR` to their Pi's (or other host's) Tailscale IP — have them run `tailscale ip -4` and paste the result in. Left at the `.env.example` default of `127.0.0.1`, every port stays loopback-only and nothing in Phase 5 or 6 will be reachable from another tailnet device.
+2. Fill in `.env` from `.env.example` with the values from Phase 3 and Phase 4 — in the file, not in chat. `mcp-tailscale` and `mcp-graph` are two separate Docker Compose projects, each with their own `.env`. In both files, also set `BIND_ADDR` to their Pi's (or other host's) Tailscale IP — have them run `tailscale ip -4` and paste the result in. Left at the `.env.example` default of `127.0.0.1`, every port stays loopback-only and nothing in Phase 5 or 6 will be reachable from another tailnet device. If they chose the account-mutation tools in Phase 3, also set `PROTECTED_UPNS` in `mcp-graph/.env` to the break-glass UPNs they listed then.
 3. `docker compose up -d`, run once inside `mcp-tailscale/` and once inside `mcp-graph/` — there's no root-level compose file, so running it from the repo root won't find either.
 4. Check each container is healthy before moving on — don't let a silent failure in one service get blamed on another later.
 5. Confirm the dashboard loads over Tailscale from another device.
