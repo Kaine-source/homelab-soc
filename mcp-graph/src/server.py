@@ -58,16 +58,50 @@ def graph_get(path: str) -> dict:
         return r.json()
 
 
+# Graph pages collections (commonly ~100 items/page) and expects callers to follow
+# @odata.nextLink for the rest. graph_get only ever returns the first page — fine for
+# a single resource or a deliberately bounded $top query, but silently wrong for
+# anything claiming to cover "all" of something (every user, every CA policy, every
+# group a user belongs to): past the first page it just drops the rest with no error,
+# so "no CA exclusion found" or "no stale users" could be true only of page 1.
+# MAX_PAGES bounds the walk so a pathologically large collection can't hang a
+# chat-tool call forever; `complete` tells the caller whether it actually reached the
+# end or gave up at that bound, so a caller can be honest about which happened
+# instead of treating a bounded walk as if it were exhaustive.
+MAX_PAGES = 50
+
+
+def graph_get_all(path: str) -> tuple[list[dict], bool]:
+    """Follow @odata.nextLink and return (all items, complete). `complete` is False
+    only if MAX_PAGES was hit before Graph stopped returning a nextLink — for any
+    normal tenant this is True."""
+    token = get_token()
+    items: list[dict] = []
+    url = f"{GRAPH_URL}{path}"
+    with httpx.Client() as client:
+        for _ in range(MAX_PAGES):
+            r = client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+            r.raise_for_status()
+            page = r.json()
+            items.extend(page.get("value", []))
+            url = page.get("@odata.nextLink")
+            if not url:
+                return items, True
+    return items, False
+
+
 @mcp.tool()
 def list_users() -> str:
     """List all users in the tenant with their account status."""
     logger.info("list_users called")
     _log_action("list_users", {})
-    users = graph_get("/users?$select=displayName,userPrincipalName,accountEnabled,createdDateTime")
+    users, complete = graph_get_all("/users?$select=displayName,userPrincipalName,accountEnabled,createdDateTime")
     lines = []
-    for u in users.get("value", []):
+    for u in users:
         status = "✅ enabled" if u.get("accountEnabled") else "🚫 disabled"
         lines.append(f"- {u['displayName']} ({u['userPrincipalName']}) — {status}")
+    if not complete:
+        lines.append(f"\n⚠️ Stopped after {MAX_PAGES} pages — this tenant has more users than that; the list above is partial.")
     return "\n".join(lines) if lines else "No users found."
 
 
@@ -95,9 +129,9 @@ def list_ca_policies() -> str:
     """List all Conditional Access policies, their state, and excluded users/groups."""
     logger.info("list_ca_policies called")
     _log_action("list_ca_policies", {})
-    policies = graph_get("/identity/conditionalAccess/policies")
+    policies, complete = graph_get_all("/identity/conditionalAccess/policies")
     lines = []
-    for p in policies.get("value", []):
+    for p in policies:
         state = p.get("state", "unknown")
         icon = "✅" if state == "enabled" else "⚠️" if state == "enabledForReportingButNotEnforced" else "🚫"
         conditions = p.get("conditions", {})
@@ -111,14 +145,23 @@ def list_ca_policies() -> str:
             excl_parts.append(f"{len(excluded_groups)} group(s)")
         excl_str = f" [excludes: {', '.join(excl_parts)}]" if excl_parts else " [no exclusions]"
         lines.append(f"{icon} {p['displayName']} — {state}{excl_str}")
+    if not complete:
+        lines.append(f"\n⚠️ Stopped after {MAX_PAGES} pages — this tenant has more CA policies than that; the list above is partial.")
     return "\n".join(lines) if lines else "No CA policies found."
 
 
 @mcp.tool()
-def get_risky_sign_ins() -> str:
-    """Return the 10 most recent failed sign-ins from the audit log."""
-    logger.info("get_risky_sign_ins called")
-    _log_action("get_risky_sign_ins", {})
+def get_failed_sign_ins() -> str:
+    """Return the 10 most recent failed sign-ins from the audit log.
+
+    This is plain authentication failures (status/errorCode ne 0), not Identity
+    Protection risk detections — those are a distinct Entra ID P2 signal
+    (riskState/riskLevelDuringSignIn) that this call doesn't request and may not
+    even be licensed for. A failed sign-in alone isn't evidence of a risky one;
+    don't conflate the two when reporting on this.
+    """
+    logger.info("get_failed_sign_ins called")
+    _log_action("get_failed_sign_ins", {})
     logs = graph_get(
         "/auditLogs/signIns?$filter=status/errorCode ne 0"
         "&$top=10&$select=userDisplayName,userPrincipalName,status,createdDateTime,ipAddress,location,clientAppUsed"
@@ -153,49 +196,97 @@ def list_stale_users() -> str:
     _log_action("list_stale_users", {})
     from datetime import datetime, timezone, timedelta
 
-    # Get all enabled users
-    users = graph_get(
+    # Get all enabled users — must be the complete set, or a user on a later page
+    # would be silently missing from the comparison entirely (not just unscored).
+    all_users_list, users_complete = graph_get_all(
         "/users?$select=displayName,userPrincipalName,accountEnabled"
         "&$filter=accountEnabled eq true"
     )
-    all_users = {u["userPrincipalName"].lower(): u for u in users.get("value", [])}
+    all_users = {u["userPrincipalName"].lower(): u for u in all_users_list}
 
-    # Pull last 500 successful sign-ins from audit logs (P1: 30-day retention)
+    # Sign-in logs are returned newest-first with no $orderby needed, so we don't have
+    # to paginate the whole log to cover the 30-day window — only until an entry older
+    # than `cutoff` shows up; everything before that point is covered. MAX_PAGES still
+    # bounds this in case a very high-volume tenant never produces an entry that old
+    # within that many pages (sign-in logs older than the cutoff should normally start
+    # appearing well before then); `signins_complete` says which of those actually
+    # happened, and anyone not yet seen when we stop for either reason gets a different,
+    # more honest label depending on which.
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    last_seen = {}
+    signins_complete = False
+    pages_scanned = 0
     try:
-        # No $orderby — sign-in logs return newest-first by default
-        # Filter client-side to avoid server-side timeout
-        logs = graph_get(
-            "/auditLogs/signIns"
-            "?$top=500"
-            "&$select=userPrincipalName,createdDateTime,status"
+        token = get_token()
+        url = (
+            f"{GRAPH_URL}/auditLogs/signIns"
+            "?$top=200&$select=userPrincipalName,createdDateTime,status"
         )
-        # Build last-seen lookup — successful sign-ins only, first hit = most recent
-        last_seen = {}
-        for entry in logs.get("value", []):
-            if entry.get("status", {}).get("errorCode", 1) != 0:
-                continue
-            upn = entry.get("userPrincipalName", "").lower()
-            ts = entry.get("createdDateTime", "")
-            if upn and upn not in last_seen:
-                last_seen[upn] = ts
+        with httpx.Client() as client:
+            for _ in range(MAX_PAGES):
+                r = client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+                r.raise_for_status()
+                page = r.json()
+                pages_scanned += 1
+                crossed_cutoff = False
+                for entry in page.get("value", []):
+                    ts = entry.get("createdDateTime", "")
+                    if ts and ts < cutoff:
+                        crossed_cutoff = True
+                        break
+                    if entry.get("status", {}).get("errorCode", 1) != 0:
+                        continue
+                    upn = entry.get("userPrincipalName", "").lower()
+                    if upn and upn not in last_seen:
+                        last_seen[upn] = ts
+                if crossed_cutoff:
+                    signins_complete = True
+                    break
+                url = page.get("@odata.nextLink")
+                if not url:
+                    # Ran out of sign-in history entirely before reaching the cutoff —
+                    # that's still complete coverage of the window, just a quiet tenant.
+                    signins_complete = True
+                    break
     except Exception as e:
         return f"❌ Could not read sign-in logs: {e}"
 
     stale = []
+    partial = []
     for upn_lower, u in all_users.items():
         last = last_seen.get(upn_lower)
-        if not last:
-            stale.append(f"- {u['displayName']} ({u['userPrincipalName']}) — ⚠️ no sign-in in last 30 days (log retention limit)")
-        elif last < cutoff:
-            stale.append(f"- {u['displayName']} ({u['userPrincipalName']}) — last sign-in: {last}")
+        if last and last >= cutoff:
+            continue
+        label = f"- {u['displayName']} ({u['userPrincipalName']})"
+        if last:
+            (stale if signins_complete else partial).append(f"{label} — last sign-in: {last}")
+        elif signins_complete:
+            stale.append(f"{label} — ⚠️ no sign-in in last 30 days")
+        else:
+            partial.append(f"{label} — not seen in the {pages_scanned} most recently scanned sign-in page(s); older activity not checked")
 
-    if not stale:
-        return "✅ All enabled users have signed in within the last 30 days."
-    return (
-        f"Accounts with no recent sign-in ({len(stale)}) — P1 log retention: 30 days:\n"
-        + "\n".join(stale)
-    )
+    caveat = ""
+    if not users_complete:
+        caveat += f"\n\n⚠️ Stopped after {MAX_PAGES} pages on the user list — this tenant has more users than that; the result is partial."
+    if not signins_complete:
+        caveat += (
+            f"\n\n⚠️ Stopped after {MAX_PAGES} pages of sign-in logs without reaching the 30-day cutoff — "
+            "this tenant has more sign-in volume than that scan covers. Entries below marked 'not seen in "
+            "the scanned pages' are unconfirmed, not evidence of inactivity."
+        )
+
+    if not stale and not partial:
+        return "✅ All enabled users have signed in within the last 30 days." + caveat
+    lines = []
+    if stale:
+        lines.append(f"Accounts with no recent sign-in ({len(stale)}) — 30-day window fully checked:")
+        lines.extend(stale)
+    if partial:
+        if lines:
+            lines.append("")
+        lines.append(f"Accounts not found in the scanned sign-in history ({len(partial)}) — window not fully checked, not confirmed inactive:")
+        lines.extend(partial)
+    return "\n".join(lines) + caveat
 
 
 @mcp.tool()
@@ -203,16 +294,16 @@ def check_mfa_gaps() -> str:
     """List enabled users with no MFA method registered, per Entra's MFA registration report."""
     logger.info("check_mfa_gaps called")
     _log_action("check_mfa_gaps", {})
-    users = graph_get("/users?$select=displayName,userPrincipalName,accountEnabled&$filter=accountEnabled eq true")
-    enabled = {u["userPrincipalName"].lower(): u for u in users.get("value", [])}
+    users, users_complete = graph_get_all("/users?$select=displayName,userPrincipalName,accountEnabled&$filter=accountEnabled eq true")
+    enabled = {u["userPrincipalName"].lower(): u for u in users}
 
-    report = graph_get(
+    report, report_complete = graph_get_all(
         "/reports/authenticationMethods/userRegistrationDetails"
         "?$select=userPrincipalName,isMfaRegistered"
     )
     registered = {
         r["userPrincipalName"].lower(): r.get("isMfaRegistered", False)
-        for r in report.get("value", [])
+        for r in report
     }
 
     gaps = [
@@ -220,9 +311,19 @@ def check_mfa_gaps() -> str:
         for upn_lower, u in enabled.items()
         if not registered.get(upn_lower, False)
     ]
+    caveat = ""
+    if not users_complete or not report_complete:
+        caveat = (
+            f"\n\n⚠️ Stopped after {MAX_PAGES} pages on "
+            + " and ".join(filter(None, [
+                "the user list" if not users_complete else None,
+                "the MFA registration report" if not report_complete else None,
+            ]))
+            + " — this tenant is larger than that; the result above is partial, not a complete gap list."
+        )
     if not gaps:
-        return "✅ All enabled users have at least one MFA method registered."
-    return f"⚠️ MFA gaps ({len(gaps)} users):\n" + "\n".join(gaps)
+        return "✅ All enabled users have at least one MFA method registered." + caveat
+    return f"⚠️ MFA gaps ({len(gaps)} users):\n" + "\n".join(gaps) + caveat
 
 
 @mcp.tool()
