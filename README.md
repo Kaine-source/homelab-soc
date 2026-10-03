@@ -29,7 +29,7 @@ Raspberry Pi 4 (on the tailnet)
 
 - **The Pi** runs everything. `mcp-tailscale` talks to the Tailscale API and exposes a `run_command` tool for shell access inside the container. `mcp-graph` connects to Microsoft Graph using a registered Entra app with the client credentials flow. A Starlette-based dashboard renders the web UI with no JS framework and no build step. A separate alerter container polls both sources and fires push notifications via a self-hosted [ntfy](https://ntfy.sh) instance.
 - **Tailscale** is the backbone. Both compose files publish every port bound to `BIND_ADDR`, which defaults to `127.0.0.1` — nothing is reachable from anywhere until you set it. Set `BIND_ADDR` in each service's `.env` to your Pi's Tailscale IP (`tailscale ip -4`) to make these ports reachable over the tailnet, and only the tailnet — they're never bound to `0.0.0.0`, so the Pi's LAN interface and the internet can't reach them regardless of firewall state.
-- **Claude Desktop** connects to both MCP servers via `mcp-remote`, proxied over Tailscale, giving Claude live tools (`list_devices`, `get_risky_sign_ins`, `list_ca_policies`, `check_mfa_gaps`) without copying and pasting API responses.
+- **Claude Desktop** connects to both MCP servers via `mcp-remote`, proxied over Tailscale, giving Claude live tools (`list_devices`, `get_failed_sign_ins`, `list_ca_policies`, `check_mfa_gaps`) without copying and pasting API responses.
 
 ## Stack
 
