@@ -72,13 +72,16 @@ Once the above is settled:
 4. Check each container actually started cleanly — `docker compose logs` on each, looking specifically for an Entra token-acquisition failure in `mcp-graph` (bad tenant/client ID/secret) and for the "MCP_AUTH_TOKEN is not set" refusal in either server (means step 2 was skipped or the container wasn't recreated after editing `.env`). A container showing as "running" isn't the same as having started without error — read the log, don't just check `docker compose ps`.
 5. From a device that's **on** the tailnet, confirm the dashboard loads at the Tailscale IP set in step 2, and that an MCP request reaches each server (a 401 means it reached the server but the bearer token didn't match — progress, not success; anything else not connecting at all means check `BIND_ADDR` again).
 6. From a device that's **not** on the tailnet (or with Tailscale paused on the test device), confirm the same ports are unreachable. This is the other half of step 5 — "reachable from the tailnet" only means something if "unreachable from everywhere else" is also true, and it's cheap to check now rather than assume it.
-7. Trigger one real end-to-end check per thing they chose: a live tool call from the connected AI client (not just a container health check) for each MCP server, and — if notifications were set up — force one through (the alerter polls on `POLL_INTERVAL`; or trigger a condition it watches for) and confirm it actually lands in ntfy.
 
 Treat a failure at any of these as a stop, not a note-to-self — fix it before moving to the next step, the same way a broken foundation doesn't get built over.
 
 ### Phase 6 — Connect an AI assistant to it
 
 If they use Claude Desktop: walk them through adding the MCP servers via `mcp-remote`, proxied over Tailscale, matching the pattern in the README. Both servers check every request's `Authorization` header against `MCP_AUTH_TOKEN` (a plain bearer-token comparison — see Phase 5 step 2 for generating it); whatever client they use needs to be configured to send that same token as a `Bearer` header on its requests to the server, which is usually a connection-level setting (a custom-header option, an auth config block) rather than something typed into a chat turn — check that specific client's own docs for how it takes custom headers, since this varies by client and isn't something to guess at. If they use a different assistant with MCP support, adapt accordingly — the servers themselves don't care which client connects, only that it presents the right token.
+
+### Phase 7 — End-to-end verification
+
+Now that an AI client is actually connected, trigger one real end-to-end check per thing they chose: a live tool call from that connected client (not just a container health check) for each MCP server, and — if notifications were set up — force one through (the alerter polls on `POLL_INTERVAL`; or trigger a condition it watches for) and confirm it actually lands in ntfy. Treat a failure here the same as in Phase 5 — a stop, not a note-to-self.
 
 ---
 
