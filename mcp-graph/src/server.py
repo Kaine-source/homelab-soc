@@ -301,16 +301,32 @@ def check_mfa_gaps() -> str:
         "/reports/authenticationMethods/userRegistrationDetails"
         "?$select=userPrincipalName,isMfaRegistered"
     )
-    registered = {
-        r["userPrincipalName"].lower(): r.get("isMfaRegistered", False)
-        for r in report
-    }
+    # The user list and the registration report are paged independently, so their
+    # capped subsets (when either hits MAX_PAGES) don't line up — a user missing from
+    # a capped report is not the same as a user the report actually says has no MFA.
+    # Only a UPN that genuinely appears in the report, with isMfaRegistered=False, is
+    # a confirmed gap. One that never appears is unknown, not a gap, regardless of
+    # whether the report happened to finish — treating "absent" as "confirmed registered"
+    # was exactly the false-positive bug this replaces.
+    registered_true = set()
+    registered_seen = set()
+    for r in report:
+        upn_lower = r["userPrincipalName"].lower()
+        registered_seen.add(upn_lower)
+        if r.get("isMfaRegistered", False):
+            registered_true.add(upn_lower)
 
-    gaps = [
-        f"- {u['displayName']} ({u['userPrincipalName']})"
-        for upn_lower, u in enabled.items()
-        if not registered.get(upn_lower, False)
-    ]
+    gaps = []
+    unknown = []
+    for upn_lower, u in enabled.items():
+        if upn_lower in registered_true:
+            continue
+        label = f"- {u['displayName']} ({u['userPrincipalName']})"
+        if upn_lower in registered_seen:
+            gaps.append(label)
+        else:
+            unknown.append(label)
+
     caveat = ""
     if not users_complete or not report_complete:
         caveat = (
@@ -319,7 +335,13 @@ def check_mfa_gaps() -> str:
                 "the user list" if not users_complete else None,
                 "the MFA registration report" if not report_complete else None,
             ]))
-            + " — this tenant is larger than that; the result above is partial, not a complete gap list."
+            + " — this tenant is larger than that; the result above is partial."
+        )
+    if unknown:
+        caveat += (
+            f"\n\n⚠️ {len(unknown)} enabled user(s) never appeared in the registration report at all "
+            "(not the same as a confirmed gap — could be a capped/incomplete report, or a report quirk "
+            "for that account):\n" + "\n".join(unknown)
         )
     if not gaps:
         return "✅ All enabled users have at least one MFA method registered." + caveat
