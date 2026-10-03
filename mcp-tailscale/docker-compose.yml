@@ -34,10 +34,13 @@ services:
     build: .
     env_file:
       - .env
-    environment:
-      - NTFY_URL=http://ntfy:80
-      - NTFY_TOPIC=homelab-alerts
-      - POLL_INTERVAL=60
+    # No `environment:` block here on purpose. Compose's `environment:` key takes
+    # precedence over `env_file:` for the same variable name — a hardcoded NTFY_URL/
+    # NTFY_TOPIC/POLL_INTERVAL here would silently override whatever the operator set
+    # in .env (e.g. pointing NTFY_TOPIC at ntfy.sh per the README's "or just use the
+    # public ntfy.sh server" option). alerter.py already defaults to the same values
+    # these used to hardcode, so unset .env vars behave identically; set ones now
+    # actually take effect.
     restart: unless-stopped
     command: python -u src/alerter.py
     depends_on:
