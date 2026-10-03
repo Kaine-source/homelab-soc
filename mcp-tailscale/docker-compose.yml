@@ -1,4 +1,8 @@
 services:
+  # Read-only baseline: list_devices/get_offline_devices/get_device only. No shell,
+  # no Docker socket, no access to anything outside the one narrow SHARED_DATA_DIR
+  # mount below (which holds nothing but the shared action log). To opt into
+  # run_command/restart_service/get_logs/disk_usage, see docker-compose.admin.yml.
   mcp-tailscale:
     build: .
     ports:
@@ -7,8 +11,7 @@ services:
       - .env
     restart: unless-stopped
     volumes:
-      - /home/kaine:/home/kaine
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SHARED_DATA_DIR}:/data
   dashboard:
     build: .
     ports:
@@ -19,7 +22,7 @@ services:
     command: python src/dashboard.py
     volumes:
       - ./src:/app/src
-      - /home/kaine:/home/kaine
+      - ${SHARED_DATA_DIR}:/data
 
   ntfy:
     image: binwiederhier/ntfy

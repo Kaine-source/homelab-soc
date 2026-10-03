@@ -12,7 +12,9 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-graph")
 
 import json as _json
-_ACTION_LOG = "/home/kaine/action.log"
+# /data is the narrow, configurable SHARED_DATA_DIR mount (docker-compose.yml) — the
+# container-internal path is fixed; what it maps to on the host is what's configurable.
+_ACTION_LOG = "/data/action.log"
 
 def _log_action(tool: str, args: dict):
     try:
@@ -30,6 +32,11 @@ CLIENT_SECRET  = os.getenv("GRAPH_CLIENT_SECRET")
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 GRAPH_URL      = "https://graph.microsoft.com/v1.0"
 TOKEN_URL      = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+
+# disable_user/delete_user are account mutations, not monitoring — absent from the
+# exposed tool list by default, not merely refusing calls, until explicitly opted into.
+# pre_delete_check stays available either way since it's read-only.
+ENABLE_ACCOUNT_MUTATIONS = os.getenv("ENABLE_ACCOUNT_MUTATIONS", "false").lower() == "true"
 
 mcp = FastMCP("Graph Monitor")
 
@@ -250,7 +257,6 @@ def get_named_locations() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
 def disable_user(upn: str) -> str:
     """Disable a user account in Entra ID (reversible — sets accountEnabled to false).
 
@@ -279,7 +285,6 @@ def disable_user(upn: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
 def delete_user(upn: str, confirm: bool = False) -> str:
     """Permanently delete a user from Entra ID.
 
@@ -322,6 +327,18 @@ def delete_user(upn: str, confirm: bool = False) -> str:
     except Exception as e:
         logger.error(f"delete_user error: {e}")
         return f"Error: {e}"
+
+
+# Registered only when explicitly opted into (see ENABLE_ACCOUNT_MUTATIONS above) —
+# absent from the tool list entirely otherwise, not merely present-but-refusing.
+if ENABLE_ACCOUNT_MUTATIONS:
+    mcp.tool()(disable_user)
+    mcp.tool()(delete_user)
+else:
+    logger.warning(
+        "Account mutation tools (disable_user, delete_user) are disabled — set "
+        "ENABLE_ACCOUNT_MUTATIONS=true to expose them."
+    )
 
 
 @mcp.tool()

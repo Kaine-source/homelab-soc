@@ -20,7 +20,9 @@ GRAPH_CLIENT_SECRET = os.getenv("GRAPH_CLIENT_SECRET")
 BASE_URL   = "https://api.tailscale.com/api/v2"
 GRAPH_URL  = "https://graph.microsoft.com/v1.0"
 TOKEN_URL  = f"https://login.microsoftonline.com/{GRAPH_TENANT_ID}/oauth2/v2.0/token"
-ACTION_LOG = "/home/kaine/action.log"
+# /data is the narrow, configurable SHARED_DATA_DIR mount (docker-compose.yml) — the
+# container-internal path is fixed; what it maps to on the host is what's configurable.
+ACTION_LOG = "/data/action.log"
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 

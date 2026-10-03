@@ -1,0 +1,17 @@
+# Opt-in administration override. Adds the Docker socket to mcp-tailscale, which is
+# what run_command/restart_service/get_logs/disk_usage need to do anything at the
+# host/container level — the base docker-compose.yml alone never grants this.
+#
+# Mounting the socket is necessary but not sufficient on its own: those four tools
+# are also absent from the MCP tool list entirely unless ENABLE_ADMIN_TOOLS=true is
+# set in mcp-tailscale/.env. Bring the stack up with both layers of opt-in:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
+#
+# Plain `docker compose up -d` (no -f override) stays on the read-only baseline:
+# list_devices/get_offline_devices/get_device only, no shell, no Docker socket,
+# regardless of what ENABLE_ADMIN_TOOLS is set to.
+services:
+  mcp-tailscale:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
