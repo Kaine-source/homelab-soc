@@ -14,7 +14,9 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-tailscale")
 
 import json as _json
-_ACTION_LOG = "/home/kaine/action.log"
+# /data is the narrow, configurable SHARED_DATA_DIR mount (docker-compose.yml) — the
+# container-internal path is fixed; what it maps to on the host is what's configurable.
+_ACTION_LOG = "/data/action.log"
 
 def _log_action(tool: str, args: dict):
     try:
@@ -30,6 +32,12 @@ TAILSCALE_API_KEY = os.getenv("TAILSCALE_API_KEY")
 TAILSCALE_TAILNET = os.getenv("TAILSCALE_TAILNET")
 MCP_AUTH_TOKEN    = os.getenv("MCP_AUTH_TOKEN", "")
 BASE_URL          = "https://api.tailscale.com/api/v2"
+
+# Shell access, service control and disk/Docker inspection are administration, not
+# monitoring — absent from the exposed tool list by default, not merely refusing calls,
+# until explicitly opted into. See docker-compose.admin.yml for the other half (Docker
+# socket access), which this flag alone does not grant.
+ENABLE_ADMIN_TOOLS = os.getenv("ENABLE_ADMIN_TOOLS", "false").lower() == "true"
 
 mcp = FastMCP("Tailscale Monitor")
 
@@ -81,7 +89,6 @@ def get_device(name: str) -> str:
         f"Tailscale version: {match['clientVersion']}"
     )
 
-@mcp.tool()
 def run_command(command: str) -> str:
     """Run a shell command on the Raspberry Pi and return the output."""
     logger.info(f"run_command: {command}")
@@ -106,7 +113,6 @@ def run_command(command: str) -> str:
         logger.error(f"run_command error: {e}")
         return f"Error: {e}"
 
-@mcp.tool()
 def restart_service(service: str) -> str:
     """Restart a Docker Compose service on the Pi by name (e.g. 'mcp-tailscale', 'mcp-graph', 'dashboard').
     
@@ -136,7 +142,6 @@ def restart_service(service: str) -> str:
         logger.error(f"restart_service error: {e}")
         return f"Error: {e}"
 
-@mcp.tool()
 def get_logs(service: str, lines: int = 50) -> str:
     """Get recent logs for a Docker Compose service (default 50 lines).
     
@@ -165,33 +170,52 @@ def get_logs(service: str, lines: int = 50) -> str:
         logger.error(f"get_logs error: {e}")
         return f"Error: {e}"
 
-@mcp.tool()
 def disk_usage() -> str:
-    """Return disk usage for the Raspberry Pi — overall and top directories."""
+    """Return disk usage for the Raspberry Pi — overall and Docker's own footprint."""
     logger.info("disk_usage called")
     _log_action("disk_usage", {})
     try:
         df = subprocess.run("df -h /", shell=True, capture_output=True, text=True, timeout=10)
-        du = subprocess.run(
-            "du -sh /home/kaine/mcp-tailscale /home/kaine/mcp-graph 2>/dev/null",
-            shell=True, capture_output=True, text=True, timeout=15
-        )
-        # Get Docker info via SDK
+        # Docker's own disk footprint (images/containers/volumes/build cache), via the
+        # SDK rather than `du` on a specific host checkout path — this used to run `du`
+        # against a literal /home/kaine/mcp-tailscale, which only worked for that one
+        # person's own directory layout and stopped being reachable once the full
+        # home-directory mount this relied on was replaced with the narrow /data mount.
         try:
             client = docker_sdk.from_env()
             containers = client.containers.list(all=True)
             docker_info = "\n".join([
                 f"  {c.name}: {c.status}" for c in containers
             ])
-            docker_section = f"\n\n=== Docker Containers ===\n{docker_info}"
+            df_info = client.df()
+            layers = df_info.get("LayersSize", 0)
+            docker_section = (
+                f"\n\n=== Docker Containers ===\n{docker_info}"
+                f"\n\n=== Docker Disk Footprint ===\n  Image layers: {layers / (1024**2):.0f} MiB"
+            )
         except Exception:
             docker_section = ""
-        return f"=== Disk Usage ===\n{df.stdout.strip()}\n\n=== Key Directories ===\n{du.stdout.strip()}{docker_section}"
+        return f"=== Disk Usage ===\n{df.stdout.strip()}{docker_section}"
     except subprocess.TimeoutExpired:
         return "Disk usage check timed out"
     except Exception as e:
         logger.error(f"disk_usage error: {e}")
         return f"Error: {e}"
+
+
+# Registered only when explicitly opted into (see ENABLE_ADMIN_TOOLS above) — absent
+# from the tool list entirely otherwise, not merely present-but-refusing.
+if ENABLE_ADMIN_TOOLS:
+    mcp.tool()(run_command)
+    mcp.tool()(restart_service)
+    mcp.tool()(get_logs)
+    mcp.tool()(disk_usage)
+else:
+    logger.warning(
+        "Admin tools (run_command, restart_service, get_logs, disk_usage) are disabled — "
+        "set ENABLE_ADMIN_TOOLS=true and bring the stack up with docker-compose.admin.yml "
+        "to expose them."
+    )
 
 if __name__ == "__main__":
     import uvicorn

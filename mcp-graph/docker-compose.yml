@@ -8,4 +8,4 @@ services:
     restart: unless-stopped
     volumes:
       - ./src:/app/src
-      - /home/kaine:/home/kaine
+      - ${SHARED_DATA_DIR}:/data

@@ -20,14 +20,15 @@ MacBook Pro (Claude Desktop)
   └── npx mcp-remote → Pi:8090  (mcp-graph)
 
 Raspberry Pi 4 (on the tailnet)
-  └── mcp-tailscale  :8080  — Tailscale API + shell
-  └── mcp-graph      :8090  — Microsoft Graph tools
+  └── mcp-tailscale  :8080  — Tailscale API (+ opt-in shell/Docker admin)
+  └── mcp-graph      :8090  — Microsoft Graph tools (+ opt-in account mutations)
   └── dashboard      :8081  — Web UI
   └── ntfy           :8082  — Push notifications
   └── alerter              — Polling + alerts
 ```
 
-- **The Pi** runs everything. `mcp-tailscale` talks to the Tailscale API and exposes a `run_command` tool for shell access inside the container. `mcp-graph` connects to Microsoft Graph using a registered Entra app with the client credentials flow. A Starlette-based dashboard renders the web UI with no JS framework and no build step. A separate alerter container polls both sources and fires push notifications via a self-hosted [ntfy](https://ntfy.sh) instance.
+- **The Pi** runs everything. `mcp-tailscale` talks to the Tailscale API; `mcp-graph` connects to Microsoft Graph using a registered Entra app with the client credentials flow. A Starlette-based dashboard renders the web UI with no JS framework and no build step. A separate alerter container polls both sources and fires push notifications via a self-hosted [ntfy](https://ntfy.sh) instance.
+- **Administration is opt-in, in both servers.** By default neither server exposes anything beyond read-only monitoring: `mcp-tailscale` has no shell or Docker socket access (`run_command`/`restart_service`/`get_logs`/`disk_usage` are absent from its tool list entirely, not just refusing calls), and `mcp-graph` can't disable or delete accounts (`disable_user`/`delete_user` likewise absent). Opting into either needs an explicit `ENABLE_ADMIN_TOOLS=true` / `ENABLE_ACCOUNT_MUTATIONS=true` in that server's `.env` — and for `mcp-tailscale`'s Docker socket specifically, also bringing the stack up with `docker-compose.admin.yml` (`docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d`). Both servers also mount one narrow `SHARED_DATA_DIR` (just the shared action log) instead of a full home directory.
 - **Tailscale** is the backbone. Both compose files publish every port bound to `BIND_ADDR`, which defaults to `127.0.0.1` — nothing is reachable from anywhere until you set it. Set `BIND_ADDR` in each service's `.env` to your Pi's Tailscale IP (`tailscale ip -4`) to make these ports reachable over the tailnet, and only the tailnet — they're never bound to `0.0.0.0`, so the Pi's LAN interface and the internet can't reach them regardless of firewall state.
 - **Claude Desktop** connects to both MCP servers via `mcp-remote`, proxied over Tailscale, giving Claude live tools (`list_devices`, `get_risky_sign_ins`, `list_ca_policies`, `check_mfa_gaps`) without copying and pasting API responses.
 
