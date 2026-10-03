@@ -203,9 +203,17 @@ def disk_usage() -> str:
         return f"Error: {e}"
 
 
-# Registered only when explicitly opted into (see ENABLE_ADMIN_TOOLS above) — absent
-# from the tool list entirely otherwise, not merely present-but-refusing.
-if ENABLE_ADMIN_TOOLS:
+# Registered only when BOTH opt-ins are present — absent from the tool list entirely
+# otherwise, not merely present-but-refusing. ENABLE_ADMIN_TOOLS alone is not enough:
+# run_command executes arbitrary shell via subprocess and doesn't actually need the
+# Docker socket to do that, so checking the flag alone would let it slip through on
+# the plain compose file (no docker-compose.admin.yml), contradicting that file's own
+# documented guarantee that the base stack has no shell access regardless of the flag.
+# Requiring the socket's presence too ties shell access to the same two-layer opt-in
+# as the Docker-dependent tools (restart_service/get_logs/disk_usage).
+_DOCKER_SOCKET_PRESENT = os.path.exists("/var/run/docker.sock")
+
+if ENABLE_ADMIN_TOOLS and _DOCKER_SOCKET_PRESENT:
     mcp.tool()(run_command)
     mcp.tool()(restart_service)
     mcp.tool()(get_logs)
@@ -213,8 +221,9 @@ if ENABLE_ADMIN_TOOLS:
 else:
     logger.warning(
         "Admin tools (run_command, restart_service, get_logs, disk_usage) are disabled — "
-        "set ENABLE_ADMIN_TOOLS=true and bring the stack up with docker-compose.admin.yml "
-        "to expose them."
+        "set ENABLE_ADMIN_TOOLS=true AND bring the stack up with docker-compose.admin.yml "
+        "(which mounts the Docker socket) to expose them. Both are required; either alone "
+        "leaves them absent from the tool list."
     )
 
 if __name__ == "__main__":
